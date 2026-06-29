@@ -79,7 +79,7 @@ st.title("Indian Silk Saree Classification")
 st.caption(
     "10 GI-Tagged Varieties  |  "
     "ResNet-50: 95.72%  |  MobileNetV2: 95.39%  |  "
-    "NIT Silchar Research Project"
+    
 )
 st.divider()
 
@@ -98,7 +98,7 @@ with col2:
     mode = st.radio(
         "Mode",
         ["Single image",
-         "Multi-image ensemble (5-10 images, Prof Roy method)"],
+         "Multi-image ensemble (5-10 images)"],
         horizontal=False
     )
 
