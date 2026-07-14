@@ -5,6 +5,8 @@ import numpy as np
 from torchvision import models, transforms
 from PIL import Image
 from huggingface_hub import hf_hub_download
+import os
+os.environ["HF_HUB_DISABLE_XET"] = "1"
 
 CLASS_NAMES = ['baluchari', 'chanderi', 'kanjeevaram', 'kosa',
                'kota_doria', 'muga', 'paithani', 'patola',
