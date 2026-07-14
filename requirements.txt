@@ -3,4 +3,4 @@ torch
 torchvision
 Pillow
 numpy
-huggingface_hub
+huggingface_hub==0.24.7
