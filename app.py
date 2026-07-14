@@ -80,7 +80,7 @@ st.title("Indian Silk Saree Classification")
 st.caption(
     "10 GI-Tagged Varieties  |  "
     "ResNet-50: 95.72%  |  "
-    "MobileNetV2: 95.39% ")
+    "MobileNetV2: 95.39%  ")
 st.divider()
 
 with st.spinner("Loading models... please wait"):
@@ -116,10 +116,9 @@ if "Single" in mode:
         files = [files]
 else:
     st.info(
-       "Upload 5-10 photographs of the same saree from "
-       "different angles and regions: full view, border "
-       "close-up, pallu, body texture, zari detail. "
-       "The system will average predictions across all images.")
+        "Upload 5-10 photographs of the same saree "
+        "from different angles and regions. "
+        "Predictions will be averaged.")
     files = st.file_uploader(
         "Upload 5-10 saree photographs",
         type=['jpg', 'jpeg', 'png', 'webp'],
