@@ -145,8 +145,7 @@ if "3-Step" in mode:
         st.markdown("### Step 1")
         st.markdown("**Full saree photograph**")
         st.caption(
-            "Stand back and photograph the entire saree. "
-            "Drape, folded, or flat lay — any view works.")
+            "Stand back and photograph the entire saree. ")
         file1 = st.file_uploader(
             "Upload full view",
             type=['jpg','jpeg','png','webp'],
