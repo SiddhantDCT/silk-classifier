@@ -81,11 +81,47 @@ def predict_image(pil_image, model):
             model(tensor)[0], dim=0).numpy()
     return probs
 
+def weighted_vote_predict(images, model):
+    """
+    Weighted majority voting across multiple images.
+    Each image votes for its predicted class.
+    Vote weight = prediction confidence.
+    Confidence increases as more images agree.
+    """
+    transform = transforms.Compose([
+        transforms.Resize((IMG_SIZE, IMG_SIZE)),
+        transforms.ToTensor(),
+        transforms.Normalize(MEAN, STD),
+    ])
 
-def ensemble_predict(images, model):
-    all_probs = [predict_image(img, model)
-                 for img in images]
-    return np.mean(all_probs, axis=0), all_probs
+    vote_weights  = np.zeros(NUM_CLASSES)
+    individual    = []
+
+    for img in images:
+        tensor = transform(img).unsqueeze(0)
+        with torch.no_grad():
+            probs = torch.softmax(
+                model(tensor)[0], dim=0).numpy()
+        pred_idx   = probs.argmax()
+        pred_class = CLASS_NAMES[pred_idx]
+        confidence = probs[pred_idx]
+
+        # Add weighted vote
+        vote_weights[pred_idx] += confidence
+
+        individual.append({
+            'pred': pred_class,
+            'conf': confidence * 100
+        })
+
+    # Normalise votes to get final confidence
+    total       = vote_weights.sum()
+    final_votes = (vote_weights / total) * 100
+    final_idx   = final_votes.argmax()
+    final_class = CLASS_NAMES[final_idx]
+    final_conf  = final_votes[final_idx]
+
+    return final_class, final_conf, individual, final_votes
 
 
 # ── PAGE CONFIG ────────────────────────────────────────────────
