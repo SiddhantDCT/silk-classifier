@@ -81,12 +81,11 @@ def predict_image(pil_image, model):
             model(tensor)[0], dim=0).numpy()
     return probs
 
-def weighted_vote_predict(images, model):
+def tempered_bayesian_fusion(images, model, alpha=0.4):
     """
-    Weighted majority voting across multiple images.
-    Each image votes for its predicted class.
-    Vote weight = prediction confidence.
-    Confidence increases as more images agree.
+    Sequential tempered Bayesian fusion.
+    Confidence builds monotonically as informative images are added,
+    unlike softmax averaging.
     """
     transform = transforms.Compose([
         transforms.Resize((IMG_SIZE, IMG_SIZE)),
@@ -94,34 +93,28 @@ def weighted_vote_predict(images, model):
         transforms.Normalize(MEAN, STD),
     ])
 
-    vote_weights  = np.zeros(NUM_CLASSES)
-    individual    = []
+    posterior = np.ones(NUM_CLASSES) / NUM_CLASSES  # uniform prior
+    individual = []
 
     for img in images:
         tensor = transform(img).unsqueeze(0)
         with torch.no_grad():
-            probs = torch.softmax(
-                model(tensor)[0], dim=0).numpy()
-        pred_idx   = probs.argmax()
-        pred_class = CLASS_NAMES[pred_idx]
-        confidence = probs[pred_idx]
+            probs = torch.softmax(model(tensor)[0], dim=0).numpy()
 
-        # Add weighted vote
-        vote_weights[pred_idx] += confidence
+        pred_idx = probs.argmax()
+        individual.append({'pred': CLASS_NAMES[pred_idx],
+                           'conf': float(probs[pred_idx]) * 100})
 
-        individual.append({
-            'pred': pred_class,
-            'conf': confidence * 100
-        })
+        # temperature-scaled likelihood
+        likelihood = np.power(probs, alpha)
+        posterior  = posterior * likelihood
+        posterior  = posterior / posterior.sum()  # renormalize
 
-    # Normalise votes to get final confidence
-    total       = vote_weights.sum()
-    final_votes = (vote_weights / total) * 100
-    final_idx   = final_votes.argmax()
+    final_idx   = posterior.argmax()
     final_class = CLASS_NAMES[final_idx]
-    final_conf  = final_votes[final_idx]
+    final_conf  = posterior[final_idx] * 100
 
-    return final_class, final_conf, individual, final_votes
+    return final_class, final_conf, individual, posterior
 
 
 # ── PAGE CONFIG ────────────────────────────────────────────────
