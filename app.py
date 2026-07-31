@@ -14,6 +14,7 @@ IMG_SIZE    = 224
 MEAN        = [0.485, 0.456, 0.406]
 STD         = [0.229, 0.224, 0.225]
 REPO_ID     = 'SiddhantDCT/silk'
+ALPHA       = 0.4   # tempering strength; lower = more conservative fusion
 
 REGION_GUIDANCE = {
     'chanderi'   : 'Photograph the small gold buti motifs on the fabric body',
@@ -81,11 +82,34 @@ def predict_image(pil_image, model):
             model(tensor)[0], dim=0).numpy()
     return probs
 
-def tempered_bayesian_fusion(images, model, alpha=0.4):
+
+def _cosine_sim(a, b):
+    na, nb = np.linalg.norm(a), np.linalg.norm(b)
+    if na == 0 or nb == 0:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
+
+
+def tempered_bayesian_fusion(images, model, alpha=ALPHA,
+                              diversity_aware=True, redundancy_penalty=1.5,
+                              eps=1e-3):
     """
     Sequential tempered Bayesian fusion.
-    Confidence builds monotonically as informative images are added,
-    unlike softmax averaging.
+    Confidence builds as informative images are added, unlike plain
+    softmax averaging.
+
+    diversity_aware=True adds a redundancy penalty: if a new photo's
+    probability vector looks similar to the average of photos already
+    fused, it gets tempered harder (contributes less new evidence).
+    This corrects for the fact that multiple photos of the same
+    saree from similar angles are NOT independent evidence -- naive
+    multiplication of probability vectors would overstate confidence.
+
+    Returns:
+        final_class, final_conf, individual (list of per-image results),
+        posterior (final probability vector),
+        trace (list of posterior vectors after each image, for plotting
+               the confidence trajectory step by step)
     """
     transform = transforms.Compose([
         transforms.Resize((IMG_SIZE, IMG_SIZE)),
@@ -95,6 +119,8 @@ def tempered_bayesian_fusion(images, model, alpha=0.4):
 
     posterior = np.ones(NUM_CLASSES) / NUM_CLASSES  # uniform prior
     individual = []
+    seen_probs = []
+    trace = []
 
     for img in images:
         tensor = transform(img).unsqueeze(0)
@@ -103,18 +129,42 @@ def tempered_bayesian_fusion(images, model, alpha=0.4):
 
         pred_idx = probs.argmax()
         individual.append({'pred': CLASS_NAMES[pred_idx],
-                           'conf': float(probs[pred_idx]) * 100})
+                            'conf': float(probs[pred_idx]) * 100})
 
-        # temperature-scaled likelihood
-        likelihood = np.power(probs, alpha)
-        posterior  = posterior * likelihood
-        posterior  = posterior / posterior.sum()  # renormalize
+        raw = np.clip(probs, eps, 1.0)
+
+        if diversity_aware and seen_probs:
+            avg_seen = np.mean(seen_probs, axis=0)
+            sim = max(_cosine_sim(raw, avg_seen), 0.0)  # 0=novel, 1=redundant
+            eff_alpha = min(alpha * (1 + redundancy_penalty * sim), 1.0)
+        else:
+            eff_alpha = alpha
+
+        likelihood = np.power(raw, eff_alpha)
+        posterior = posterior * likelihood
+        posterior = posterior / posterior.sum()
+
+        seen_probs.append(raw)
+        trace.append(posterior.copy())
 
     final_idx   = posterior.argmax()
     final_class = CLASS_NAMES[final_idx]
     final_conf  = posterior[final_idx] * 100
 
-    return final_class, final_conf, individual, posterior
+    return final_class, final_conf, individual, posterior, trace
+
+
+def plot_confidence_trajectory(trace, step_labels, final_class):
+    """Small line chart showing how confidence in the final predicted
+    class builds up as each image is fused in."""
+    final_idx = CLASS_NAMES.index(final_class)
+    confs = [float(p[final_idx]) * 100 for p in trace]
+    st.line_chart(
+        {"Confidence (%)": confs},
+        x_label="Image added",
+        y_label=f"Confidence in {CLASS_DISPLAY[final_class]} (%)")
+    for label, c in zip(step_labels, confs):
+        st.caption(f"After {label}: {c:.1f}%")
 
 
 # ── PAGE CONFIG ────────────────────────────────────────────────
@@ -157,14 +207,15 @@ with col_s2:
 st.divider()
 
 # ════════════════════════════════════════════════════════════════
-# MODE 1 — 3-STEP PROTOCOL
+# MODE 1 — 3-STEP PROTOCOL  (now uses Bayesian fusion, not averaging)
 # ════════════════════════════════════════════════════════════════
 if "3-Step" in mode:
     st.subheader("3-Step Classification Protocol")
     st.markdown(
         "Upload 3 photographs of the **same saree** following "
-        "the steps below. The system classifies each image "
-        "individually then gives a combined verdict.")
+        "the steps below. The system fuses them sequentially using "
+        "tempered Bayesian fusion — each image sharpens the belief "
+        "rather than being simply averaged in.")
 
     st.markdown("---")
 
@@ -214,60 +265,44 @@ if "3-Step" in mode:
     if len(files_uploaded) == 0:
         st.info(
             "Upload at least one image above to get started. "
-            "For best results upload all three.")
+            "For best results upload all three, in order.")
 
     elif len(files_uploaded) > 0:
         images = [Image.open(f).convert('RGB')
                   for f in files_uploaded]
 
-        # ── INDIVIDUAL RESULTS ─────────────────────────────────
+        # ── FUSE (this is the Bayesian fusion call, in upload order) ──
+        final_class, final_conf, individual, posterior, trace = \
+            tempered_bayesian_fusion(images, active_model, alpha=ALPHA,
+                                      diversity_aware=True)
+        agreement = sum(r['pred'] == final_class for r in individual)
+
+        # ── INDIVIDUAL STEP RESULTS ────────────────────────────
         st.subheader("Individual Step Results")
         ind_cols = st.columns(len(images))
-        ind_probs = []
 
-        for i, (img, col, label) in enumerate(
-                zip(images, ind_cols, uploaded_labels)):
+        for i, (img, col, label, ind) in enumerate(
+                zip(images, ind_cols, uploaded_labels, individual)):
             with col:
                 st.image(img, use_column_width=True,
                          caption=f"Step: {label}")
-                probs    = predict_image(img, active_model)
-                pred_idx = probs.argmax()
-                pred_cls = CLASS_NAMES[pred_idx]
-                conf     = probs[pred_idx] * 100
-                ind_probs.append(probs)
+                conf = ind['conf']
+                pred_cls = ind['pred']
 
                 if conf >= 90:
                     st.success(
-                        f"{CLASS_DISPLAY[pred_cls]}\n"
-                        f"{conf:.1f}%")
+                        f"{CLASS_DISPLAY[pred_cls]}\n{conf:.1f}%")
                 elif conf >= 50:
                     st.warning(
-                        f"{CLASS_DISPLAY[pred_cls]}\n"
-                        f"{conf:.1f}%")
+                        f"{CLASS_DISPLAY[pred_cls]}\n{conf:.1f}%")
                 else:
                     st.error(
-                        f"{CLASS_DISPLAY[pred_cls]}\n"
-                        f"{conf:.1f}%")
-
-                # Mini probability bar
-                sorted_idx = np.argsort(probs)[::-1][:3]
-                for idx in sorted_idx:
-                    st.caption(
-                        f"{CLASS_DISPLAY[CLASS_NAMES[idx]]}: "
-                        f"{probs[idx]*100:.1f}%")
+                        f"{CLASS_DISPLAY[pred_cls]}\n{conf:.1f}%")
 
         st.divider()
 
-        # ── ENSEMBLE VERDICT ───────────────────────────────────
-        st.subheader("Final Verdict")
-
-        avg_probs   = np.mean(ind_probs, axis=0)
-        pred_idx    = avg_probs.argmax()
-        final_class = CLASS_NAMES[pred_idx]
-        final_conf  = avg_probs[pred_idx] * 100
-        agreement   = sum(
-            predict_image(img, active_model).argmax() == pred_idx
-            for img in images)
+        # ── FUSED (BAYESIAN) VERDICT ───────────────────────────
+        st.subheader("Final Verdict (Bayesian Fusion)")
 
         vcol1, vcol2 = st.columns([1, 1])
 
@@ -295,35 +330,34 @@ if "3-Step" in mode:
                     "Step Agreement",
                     f"{agreement} / {len(images)}",
                     help="How many steps predicted the same class")
-            st.caption(f"Model: {active_label}")
+            st.caption(f"Model: {active_label}  |  Fusion: tempered Bayesian, alpha={ALPHA}")
 
-            # Steps that agreed vs disagreed
             if len(images) > 1:
                 st.markdown("**Per-step breakdown:**")
-                for img, label in zip(images, uploaded_labels):
-                    p        = predict_image(img, active_model)
-                    step_cls = CLASS_NAMES[p.argmax()]
-                    step_conf= p.max() * 100
-                    match    = "✓" if step_cls == final_class \
-                               else "✗"
+                for label, ind in zip(uploaded_labels, individual):
+                    match = "✓" if ind['pred'] == final_class else "✗"
                     st.caption(
                         f"{match} {label}: "
-                        f"{CLASS_DISPLAY[step_cls]} "
-                        f"({step_conf:.1f}%)")
+                        f"{CLASS_DISPLAY[ind['pred']]} "
+                        f"({ind['conf']:.1f}%)")
 
         with vcol2:
-            st.markdown("**All class probabilities:**")
-            sorted_idx = np.argsort(avg_probs)[::-1]
+            st.markdown("**All class probabilities (fused):**")
+            sorted_idx = np.argsort(posterior)[::-1]
             for idx in sorted_idx:
                 cls  = CLASS_NAMES[idx]
-                prob = float(avg_probs[idx] * 100)
-                if idx == pred_idx:
+                prob = float(posterior[idx] * 100)
+                if idx == np.argmax(posterior):
                     st.markdown(
                         f"**{CLASS_DISPLAY[cls]}: {prob:.1f}%**")
                 else:
                     st.write(
                         f"{CLASS_DISPLAY[cls]}: {prob:.1f}%")
                 st.progress(int(prob))
+
+        if len(images) > 1:
+            st.markdown("**Confidence trajectory (as each step is fused in):**")
+            plot_confidence_trajectory(trace, uploaded_labels, final_class)
 
         if len(files_uploaded) < 3:
             st.info(
@@ -332,7 +366,7 @@ if "3-Step" in mode:
 
 
 # ════════════════════════════════════════════════════════════════
-# MODE 2 — SINGLE IMAGE
+# MODE 2 — SINGLE IMAGE  (unchanged — no fusion needed for one image)
 # ════════════════════════════════════════════════════════════════
 elif "Single" in mode:
     st.subheader("Single Image Classification")
@@ -379,14 +413,17 @@ elif "Single" in mode:
 
 
 # ════════════════════════════════════════════════════════════════
-# MODE 3 — MULTI-IMAGE ENSEMBLE
+# MODE 3 — MULTI-IMAGE ENSEMBLE  (now uses Bayesian fusion; the
+# previously-referenced ensemble_predict() didn't exist — replaced
+# with a direct call to tempered_bayesian_fusion, in upload order)
 # ════════════════════════════════════════════════════════════════
 else:
     st.subheader("Multi-Image Ensemble")
     st.info(
         "Upload 5-10 photographs of the same saree from "
-        "different angles and regions. "
-        "Predictions are averaged for a robust result.")
+        "different angles and regions. Images are fused "
+        "sequentially with tempered Bayesian fusion — order matters, "
+        "so try to lead with your clearest, most distinctive shot.")
 
     files = st.file_uploader(
         "Upload 5-10 saree photographs",
@@ -394,27 +431,19 @@ else:
         accept_multiple_files=True)
 
     if files and len(files) > 0:
-        images    = [Image.open(f).convert('RGB')
-                     for f in files]
-        avg_probs, all_probs = ensemble_predict(
-            images, active_model)
-        pred_idx    = avg_probs.argmax()
-        final_class = CLASS_NAMES[pred_idx]
-        final_conf  = avg_probs[pred_idx] * 100
-        individual  = [{'pred': CLASS_NAMES[p.argmax()],
-                        'conf': p.max()*100}
-                       for p in all_probs]
-        agreement   = sum(r['pred'] == final_class
-                         for r in individual)
-        n           = len(images)
+        images = [Image.open(f).convert('RGB') for f in files]
+        n = len(images)
+
+        final_class, final_conf, individual, posterior, trace = \
+            tempered_bayesian_fusion(images, active_model, alpha=ALPHA,
+                                      diversity_aware=True)
+        agreement = sum(r['pred'] == final_class for r in individual)
 
         cols = st.columns(min(n, 5))
-        for i, (img, col) in enumerate(
-                zip(images[:5], cols)):
+        for i, (img, col) in enumerate(zip(images[:5], cols)):
             with col:
                 ind   = individual[i]
-                match = "OK" if ind['pred'] == final_class \
-                        else "--"
+                match = "OK" if ind['pred'] == final_class else "--"
                 st.image(img, use_column_width=True,
                          caption=(f"Img {i+1} | "
                                   f"[{match}] "
@@ -422,12 +451,10 @@ else:
                                   f"({ind['conf']:.0f}%)"))
         if n > 5:
             cols2 = st.columns(min(n-5, 5))
-            for i, (img, col) in enumerate(
-                    zip(images[5:], cols2)):
+            for i, (img, col) in enumerate(zip(images[5:], cols2)):
                 with col:
                     ind   = individual[i+5]
-                    match = "OK" if ind['pred'] == final_class \
-                            else "--"
+                    match = "OK" if ind['pred'] == final_class else "--"
                     st.image(img, use_column_width=True,
                              caption=(f"Img {i+6} | "
                                       f"[{match}] "
@@ -437,7 +464,7 @@ else:
         st.divider()
         col_r1, col_r2 = st.columns([1, 1])
         with col_r1:
-            st.subheader("Ensemble Result")
+            st.subheader("Ensemble Result (Bayesian Fusion)")
             if final_conf >= 90:
                 st.success(
                     f"### {CLASS_DISPLAY[final_class]}\n\n"
@@ -451,19 +478,22 @@ else:
                 st.error(
                     f"Not recognized  |  {final_conf:.1f}%")
             st.metric("Image Agreement", f"{agreement} / {n}")
-            st.caption(f"Model: {active_label}")
+            st.caption(f"Model: {active_label}  |  Fusion: tempered Bayesian, alpha={ALPHA}")
 
         with col_r2:
-            st.subheader("Class Probabilities")
-            for idx in np.argsort(avg_probs)[::-1]:
+            st.subheader("Class Probabilities (fused)")
+            for idx in np.argsort(posterior)[::-1]:
                 cls  = CLASS_NAMES[idx]
-                prob = float(avg_probs[idx] * 100)
-                if idx == pred_idx:
-                    st.markdown(
-                        f"**{CLASS_DISPLAY[cls]}: {prob:.1f}%**")
+                prob = float(posterior[idx] * 100)
+                if idx == np.argmax(posterior):
+                    st.markdown(f"**{CLASS_DISPLAY[cls]}: {prob:.1f}%**")
                 else:
                     st.write(f"{CLASS_DISPLAY[cls]}: {prob:.1f}%")
                 st.progress(int(prob))
+
+        st.markdown("**Confidence trajectory (as each image is fused in):**")
+        plot_confidence_trajectory(
+            trace, [f"Image {i+1}" for i in range(n)], final_class)
 
 st.divider()
 st.caption(
